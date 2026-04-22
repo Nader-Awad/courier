@@ -245,6 +245,7 @@ dependencies = [
  "crossterm",
  "imessage-database",
  "ratatui",
+ "rusqlite",
 ]
 
 [[package]]

@@ -8,6 +8,8 @@ use imessage_database::{
     },
 };
 
+use crate::contacts::ContactResolver;
+
 pub use imessage_database::util::dirs::default_db_path as default_db;
 
 #[derive(Debug, Clone)]
@@ -21,6 +23,7 @@ pub struct ConversationSummary {
 pub fn load_conversations(db_path: &Path) -> Result<Vec<ConversationSummary>, TableError> {
     let conn = get_connection(db_path)?;
     let chats: HashMap<i32, Chat> = Chat::cache(&conn)?;
+    let contacts = ContactResolver::load();
 
     let mut by_identifier: HashMap<String, Chat> = HashMap::new();
     for (_rowid, chat) in chats {
@@ -34,11 +37,18 @@ pub fn load_conversations(db_path: &Path) -> Result<Vec<ConversationSummary>, Ta
 
     let mut summaries: Vec<ConversationSummary> = by_identifier
         .into_values()
-        .map(|c| ConversationSummary {
-            rowid: c.rowid,
-            name: c.name().to_string(),
-            identifier: c.chat_identifier.clone(),
-            service: c.service_name.unwrap_or_else(|| "Unknown".to_string()),
+        .map(|c| {
+            let name = c
+                .display_name()
+                .map(String::from)
+                .or_else(|| contacts.lookup(&c.chat_identifier).map(String::from))
+                .unwrap_or_else(|| c.chat_identifier.clone());
+            ConversationSummary {
+                rowid: c.rowid,
+                name,
+                identifier: c.chat_identifier.clone(),
+                service: c.service_name.unwrap_or_else(|| "Unknown".to_string()),
+            }
         })
         .collect();
 

@@ -68,10 +68,55 @@ impl App {
 
 fn main() -> Result<()> {
     color_eyre::install()?;
+    if std::env::args().any(|a| a == "--diag") {
+        return run_diagnostics();
+    }
     let terminal = ratatui::init();
     let result = run(terminal);
     ratatui::restore();
     result
+}
+
+fn run_diagnostics() -> Result<()> {
+    use chatdb::{default_db, load_conversations};
+    use contacts::{diagnose_sources, normalize_identifier_for_debug};
+
+    println!("=== courier --diag ===\n");
+    let db = default_db();
+    println!("chat.db path: {}", db.display());
+    println!("chat.db exists: {}\n", db.exists());
+
+    let (total_mapped, per_source) = diagnose_sources();
+    println!("AddressBook sources: {}", per_source.len());
+    for (path, result) in &per_source {
+        match result {
+            Ok((phones, emails)) => {
+                println!("  ✓ {} — {phones} phones, {emails} emails", path.display());
+            }
+            Err(msg) => println!("  ✗ {} — {msg}", path.display()),
+        }
+    }
+    println!("total handles mapped: {total_mapped}\n");
+
+    let convs = load_conversations(&db)?;
+    let resolved = convs.iter().filter(|c| c.name != c.identifier).count();
+    println!(
+        "conversations: {} total, {resolved} resolved to a name ({}%)",
+        convs.len(),
+        if convs.is_empty() {
+            0
+        } else {
+            resolved * 100 / convs.len()
+        }
+    );
+
+    println!("\n--- sample unresolved (first 10) ---");
+    for c in convs.iter().filter(|c| c.name == c.identifier).take(10) {
+        let normalized = normalize_identifier_for_debug(&c.identifier);
+        println!("  identifier={:?}  normalized={:?}", c.identifier, normalized);
+    }
+
+    Ok(())
 }
 
 fn run(mut terminal: DefaultTerminal) -> Result<()> {
@@ -112,10 +157,23 @@ fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
     let items: Vec<ListItem> = app
         .chats
         .iter()
-        .map(|c| ListItem::new(Line::from(c.name.clone())))
+        .map(|c| {
+            let label = if c.resolved {
+                c.name.clone()
+            } else {
+                format!("· {}", c.name)
+            };
+            let style = if c.resolved {
+                Style::default()
+            } else {
+                Style::default().add_modifier(Modifier::DIM)
+            };
+            ListItem::new(Line::from(label)).style(style)
+        })
         .collect();
 
-    let title = format!("courier · {} chats", app.chats.len());
+    let resolved = app.chats.iter().filter(|c| c.resolved).count();
+    let title = format!("courier · {}/{} named", resolved, app.chats.len());
     let list = List::new(items)
         .block(Block::default().borders(Borders::ALL).title(title))
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED))

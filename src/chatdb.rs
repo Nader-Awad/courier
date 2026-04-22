@@ -18,6 +18,7 @@ pub struct ConversationSummary {
     pub name: String,
     pub identifier: String,
     pub service: String,
+    pub resolved: bool,
 }
 
 pub fn load_conversations(db_path: &Path) -> Result<Vec<ConversationSummary>, TableError> {
@@ -38,21 +39,29 @@ pub fn load_conversations(db_path: &Path) -> Result<Vec<ConversationSummary>, Ta
     let mut summaries: Vec<ConversationSummary> = by_identifier
         .into_values()
         .map(|c| {
-            let name = c
+            let (name, resolved) = match c
                 .display_name()
                 .map(String::from)
                 .or_else(|| contacts.lookup(&c.chat_identifier).map(String::from))
-                .unwrap_or_else(|| c.chat_identifier.clone());
+            {
+                Some(name) => (name, true),
+                None => (c.chat_identifier.clone(), false),
+            };
             ConversationSummary {
                 rowid: c.rowid,
                 name,
                 identifier: c.chat_identifier.clone(),
                 service: c.service_name.unwrap_or_else(|| "Unknown".to_string()),
+                resolved,
             }
         })
         .collect();
 
-    summaries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    summaries.sort_by(|a, b| {
+        b.resolved
+            .cmp(&a.resolved)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
     Ok(summaries)
 }
 

@@ -99,9 +99,10 @@ fn run_diagnostics() -> Result<()> {
     println!("total handles mapped: {total_mapped}\n");
 
     let convs = load_conversations(&db)?;
-    let resolved = convs.iter().filter(|c| c.name != c.identifier).count();
+    let resolved = convs.iter().filter(|c| c.resolved).count();
+    let merged: usize = convs.iter().filter(|c| c.identifiers.len() > 1).count();
     println!(
-        "conversations: {} total, {resolved} resolved to a name ({}%)",
+        "conversations: {} total, {resolved} resolved ({}%), {merged} merged across handles",
         convs.len(),
         if convs.is_empty() {
             0
@@ -110,10 +111,16 @@ fn run_diagnostics() -> Result<()> {
         }
     );
 
+    println!("\n--- sample merged (first 5) ---");
+    for c in convs.iter().filter(|c| c.identifiers.len() > 1).take(5) {
+        println!("  {} — {}", c.name, c.identifiers.join(", "));
+    }
+
     println!("\n--- sample unresolved (first 10) ---");
-    for c in convs.iter().filter(|c| c.name == c.identifier).take(10) {
-        let normalized = normalize_identifier_for_debug(&c.identifier);
-        println!("  identifier={:?}  normalized={:?}", c.identifier, normalized);
+    for c in convs.iter().filter(|c| !c.resolved).take(10) {
+        let ident = &c.identifiers[0];
+        let normalized = normalize_identifier_for_debug(ident);
+        println!("  identifier={ident:?}  normalized={normalized:?}");
     }
 
     Ok(())
@@ -159,7 +166,11 @@ fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
         .iter()
         .map(|c| {
             let label = if c.resolved {
-                c.name.clone()
+                if c.identifiers.len() > 1 {
+                    format!("{}  ×{}", c.name, c.identifiers.len())
+                } else {
+                    c.name.clone()
+                }
             } else {
                 format!("· {}", c.name)
             };
@@ -173,7 +184,17 @@ fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
         .collect();
 
     let resolved = app.chats.iter().filter(|c| c.resolved).count();
-    let title = format!("courier · {}/{} named", resolved, app.chats.len());
+    let merged: usize = app
+        .chats
+        .iter()
+        .filter(|c| c.identifiers.len() > 1)
+        .count();
+    let title = format!(
+        "courier · {}/{} named · {} merged",
+        resolved,
+        app.chats.len(),
+        merged
+    );
     let list = List::new(items)
         .block(Block::default().borders(Borders::ALL).title(title))
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
@@ -184,18 +205,30 @@ fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
 
 fn render_thread(frame: &mut Frame, app: &App, area: Rect) {
     let body = match app.selected() {
-        Some(c) => format!(
-            "{name}\n\n\
-             identifier: {ident}\n\
-             service:    {svc}\n\
-             rowid:      {rowid}\n\n\
-             (messages load in milestone 2)\n\n\
-             q/Esc to quit   j/k or ↑/↓ to navigate",
-            name = c.name,
-            ident = c.identifier,
-            svc = c.service,
-            rowid = c.rowid,
-        ),
+        Some(c) => {
+            let rowids = c
+                .rowids
+                .iter()
+                .map(|r| r.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let plural = |v: &[String]| if v.len() > 1 { "s" } else { "" };
+            let plural_i = |v: &[i32]| if v.len() > 1 { "s" } else { "" };
+            format!(
+                "{name}\n\n\
+                 handle{s_ident}:  {idents}\n\
+                 service{s_svc}: {svcs}\n\
+                 rowid{s_row}:   {rowids}\n\n\
+                 (messages load in milestone 2)\n\n\
+                 q/Esc to quit   j/k or ↑/↓ to navigate",
+                name = c.name,
+                s_ident = plural(&c.identifiers),
+                s_svc = plural(&c.services),
+                s_row = plural_i(&c.rowids),
+                idents = c.identifiers.join(", "),
+                svcs = c.services.join(", "),
+            )
+        }
         None => String::from("No conversation selected.\n\nq/Esc to quit"),
     };
     let p = Paragraph::new(body)

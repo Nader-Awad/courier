@@ -5,26 +5,34 @@ use std::{
 
 use rusqlite::{Connection, OpenFlags};
 
+#[derive(Debug, Clone)]
+pub struct ContactRef {
+    pub name: String,
+    /// Unique per AddressBook record across all sources. Two handles with the
+    /// same `record_key` point to the same contact and can be merged.
+    pub record_key: String,
+}
+
 pub struct ContactResolver {
-    handles: HashMap<String, String>,
+    handles: HashMap<String, ContactRef>,
 }
 
 impl ContactResolver {
     pub fn load() -> Self {
         let mut handles = HashMap::new();
-        for src in addressbook_sources() {
+        for (idx, src) in addressbook_sources().into_iter().enumerate() {
             if let Ok(conn) = open_ro(&src) {
-                load_phones(&conn, &mut handles);
-                load_emails(&conn, &mut handles);
+                load_phones(&conn, idx, &mut handles);
+                load_emails(&conn, idx, &mut handles);
             }
         }
         Self { handles }
     }
 
-    pub fn lookup(&self, chat_identifier: &str) -> Option<&str> {
+    pub fn lookup(&self, chat_identifier: &str) -> Option<&ContactRef> {
         for key in phone_or_email_keys(chat_identifier) {
-            if let Some(name) = self.handles.get(&key) {
-                return Some(name.as_str());
+            if let Some(c) = self.handles.get(&key) {
+                return Some(c);
             }
         }
         None
@@ -53,10 +61,12 @@ fn open_ro(path: &Path) -> rusqlite::Result<Connection> {
     )
 }
 
-/// Returns the number of contact rows inserted (one contact with multiple
-/// phone numbers counts as multiple insertions).
-fn load_phones(conn: &Connection, out: &mut HashMap<String, String>) -> usize {
-    let sql = "SELECT r.ZFIRSTNAME, r.ZLASTNAME, r.ZNICKNAME, r.ZORGANIZATION, p.ZFULLNUMBER \
+fn load_phones(
+    conn: &Connection,
+    source_idx: usize,
+    out: &mut HashMap<String, ContactRef>,
+) -> usize {
+    let sql = "SELECT r.Z_PK, r.ZFIRSTNAME, r.ZLASTNAME, r.ZNICKNAME, r.ZORGANIZATION, p.ZFULLNUMBER \
                FROM ZABCDPHONENUMBER p \
                JOIN ZABCDRECORD r ON p.ZOWNER = r.Z_PK \
                WHERE p.ZFULLNUMBER IS NOT NULL";
@@ -65,21 +75,26 @@ fn load_phones(conn: &Connection, out: &mut HashMap<String, String>) -> usize {
     };
     let rows = stmt.query_map([], |row| {
         Ok((
-            row.get::<_, Option<String>>(0)?,
+            row.get::<_, i64>(0)?,
             row.get::<_, Option<String>>(1)?,
             row.get::<_, Option<String>>(2)?,
             row.get::<_, Option<String>>(3)?,
-            row.get::<_, String>(4)?,
+            row.get::<_, Option<String>>(4)?,
+            row.get::<_, String>(5)?,
         ))
     });
     let Ok(iter) = rows else { return 0 };
     let mut n = 0;
-    for (first, last, nick, org, phone) in iter.flatten() {
+    for (z_pk, first, last, nick, org, phone) in iter.flatten() {
         if let Some(name) = build_name(first, last, nick, org) {
+            let contact = ContactRef {
+                name,
+                record_key: format!("{source_idx}:{z_pk}"),
+            };
             let mut inserted_any = false;
             for key in phone_keys(&phone) {
                 if !out.contains_key(&key) {
-                    out.insert(key, name.clone());
+                    out.insert(key, contact.clone());
                     inserted_any = true;
                 }
             }
@@ -91,8 +106,12 @@ fn load_phones(conn: &Connection, out: &mut HashMap<String, String>) -> usize {
     n
 }
 
-fn load_emails(conn: &Connection, out: &mut HashMap<String, String>) -> usize {
-    let sql = "SELECT r.ZFIRSTNAME, r.ZLASTNAME, r.ZNICKNAME, r.ZORGANIZATION, e.ZADDRESS \
+fn load_emails(
+    conn: &Connection,
+    source_idx: usize,
+    out: &mut HashMap<String, ContactRef>,
+) -> usize {
+    let sql = "SELECT r.Z_PK, r.ZFIRSTNAME, r.ZLASTNAME, r.ZNICKNAME, r.ZORGANIZATION, e.ZADDRESS \
                FROM ZABCDEMAILADDRESS e \
                JOIN ZABCDRECORD r ON e.ZOWNER = r.Z_PK \
                WHERE e.ZADDRESS IS NOT NULL";
@@ -101,20 +120,27 @@ fn load_emails(conn: &Connection, out: &mut HashMap<String, String>) -> usize {
     };
     let rows = stmt.query_map([], |row| {
         Ok((
-            row.get::<_, Option<String>>(0)?,
+            row.get::<_, i64>(0)?,
             row.get::<_, Option<String>>(1)?,
             row.get::<_, Option<String>>(2)?,
             row.get::<_, Option<String>>(3)?,
-            row.get::<_, String>(4)?,
+            row.get::<_, Option<String>>(4)?,
+            row.get::<_, String>(5)?,
         ))
     });
     let Ok(iter) = rows else { return 0 };
     let mut n = 0;
-    for (first, last, nick, org, email) in iter.flatten() {
+    for (z_pk, first, last, nick, org, email) in iter.flatten() {
         if let Some(name) = build_name(first, last, nick, org) {
             let key = normalize_email(&email);
             if !key.is_empty() && !out.contains_key(&key) {
-                out.insert(key, name);
+                out.insert(
+                    key,
+                    ContactRef {
+                        name,
+                        record_key: format!("{source_idx}:{z_pk}"),
+                    },
+                );
                 n += 1;
             }
         }
@@ -188,13 +214,13 @@ pub fn normalize_identifier_for_debug(raw: &str) -> String {
 type SourceDiagnosis = Vec<(PathBuf, Result<(usize, usize), String>)>;
 
 pub fn diagnose_sources() -> (usize, SourceDiagnosis) {
-    let mut handles: HashMap<String, String> = HashMap::new();
+    let mut handles: HashMap<String, ContactRef> = HashMap::new();
     let mut results: SourceDiagnosis = Vec::new();
-    for src in addressbook_sources() {
+    for (idx, src) in addressbook_sources().into_iter().enumerate() {
         match open_ro(&src) {
             Ok(conn) => {
-                let phones = load_phones(&conn, &mut handles);
-                let emails = load_emails(&conn, &mut handles);
+                let phones = load_phones(&conn, idx, &mut handles);
+                let emails = load_emails(&conn, idx, &mut handles);
                 results.push((src, Ok((phones, emails))));
             }
             Err(e) => results.push((src, Err(e.to_string()))),
